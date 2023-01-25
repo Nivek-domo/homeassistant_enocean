@@ -19,10 +19,10 @@ from homeassistant.const import (
     CONF_ID,
     CONF_NAME,
     PERCENTAGE,
-    POWER_WATT,
     STATE_CLOSED,
     STATE_OPEN,
-    TEMP_CELSIUS,
+    UnitOfPower,
+    UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
 import homeassistant.helpers.config_validation as cv
@@ -43,6 +43,7 @@ SENSOR_TYPE_HUMIDITY = "humidity"
 SENSOR_TYPE_POWER = "powersensor"
 SENSOR_TYPE_TEMPERATURE = "temperature"
 SENSOR_TYPE_WINDOWHANDLE = "windowhandle"
+SENSOR_TYPE_WINDOWHANDLE = "wallswitch"
 
 
 @dataclass
@@ -62,7 +63,7 @@ class EnOceanSensorEntityDescription(
 SENSOR_DESC_TEMPERATURE = EnOceanSensorEntityDescription(
     key=SENSOR_TYPE_TEMPERATURE,
     name="Temperature",
-    native_unit_of_measurement=TEMP_CELSIUS,
+    native_unit_of_measurement=UnitOfTemperature.CELSIUS,
     icon="mdi:thermometer",
     device_class=SensorDeviceClass.TEMPERATURE,
     state_class=SensorStateClass.MEASUREMENT,
@@ -82,7 +83,7 @@ SENSOR_DESC_HUMIDITY = EnOceanSensorEntityDescription(
 SENSOR_DESC_POWER = EnOceanSensorEntityDescription(
     key=SENSOR_TYPE_POWER,
     name="Power",
-    native_unit_of_measurement=POWER_WATT,
+    native_unit_of_measurement=UnitOfPower.WATT,
     icon="mdi:power-plug",
     device_class=SensorDeviceClass.POWER,
     state_class=SensorStateClass.MEASUREMENT,
@@ -94,6 +95,13 @@ SENSOR_DESC_WINDOWHANDLE = EnOceanSensorEntityDescription(
     name="WindowHandle",
     icon="mdi:window-open-variant",
     unique_id=lambda dev_id: f"{combine_hex(dev_id)}-{SENSOR_TYPE_WINDOWHANDLE}",
+)
+
+SENSOR_DESC_WALLSWITCH = EnOceanSensorEntityDescription(
+    key=SENSOR_TYPE_WALLSWITCH,
+    name="WallSwitch",
+    icon="mdi:remote-tv",
+    unique_id=lambda dev_id: f"{combine_hex(dev_id)}-{SENSOR_TYPE_WALLSWITCH}",
 )
 
 
@@ -148,8 +156,10 @@ def setup_platform(
     elif sensor_type == SENSOR_TYPE_WINDOWHANDLE:
         entities = [EnOceanWindowHandle(dev_id, dev_name, SENSOR_DESC_WINDOWHANDLE)]
 
-    if entities:
-        add_entities(entities)
+    elif sensor_type == SENSOR_TYPE_WALLSWITCH:
+        entities = [EnOceanWallSwitch(dev_id, dev_name, SENSOR_DESC_WALLSWITCH)]
+
+    add_entities(entities)
 
 
 class EnOceanSensor(EnOceanEntity, RestoreEntity, SensorEntity):
@@ -162,7 +172,7 @@ class EnOceanSensor(EnOceanEntity, RestoreEntity, SensorEntity):
         self._attr_name = f"{description.name} {dev_name}"
         self._attr_unique_id = description.unique_id(dev_id)
 
-    async def async_added_to_hass(self):
+    async def async_added_to_hass(self) -> None:
         """Call when entity about to be added to hass."""
         # If not None, we got an initial value.
         await super().async_added_to_hass()
@@ -178,7 +188,6 @@ class EnOceanSensor(EnOceanEntity, RestoreEntity, SensorEntity):
 
 class EnOceanPowerSensor(EnOceanSensor):
     """Representation of an EnOcean power sensor.
-
     EEPs (EnOcean Equipment Profiles):
     - A5-12-01 (Automated Meter Reading, Electricity)
     """
@@ -198,7 +207,6 @@ class EnOceanPowerSensor(EnOceanSensor):
 
 class EnOceanTemperatureSensor(EnOceanSensor):
     """Representation of an EnOcean temperature sensor device.
-
     EEPs (EnOcean Equipment Profiles):
     - A5-02-01 to A5-02-1B All 8 Bit Temperature Sensors of A5-02
     - A5-10-01 to A5-10-14 (Room Operating Panels)
@@ -207,7 +215,6 @@ class EnOceanTemperatureSensor(EnOceanSensor):
     - A5-10-10 (Temp. and Humidity Sensor and Set Point)
     - A5-10-12 (Temp. and Humidity Sensor, Set Point and Occupancy Control)
     - 10 Bit Temp. Sensors are not supported (A5-02-20, A5-02-30)
-
     For the following EEPs the scales must be set to "0 to 250":
     - A5-04-01
     - A5-04-02
@@ -247,7 +254,6 @@ class EnOceanTemperatureSensor(EnOceanSensor):
 
 class EnOceanHumiditySensor(EnOceanSensor):
     """Representation of an EnOcean humidity sensor device.
-
     EEPs (EnOcean Equipment Profiles):
     - A5-04-01 (Temp. and Humidity Sensor, Range 0°C to +40°C and 0% to 100%)
     - A5-04-02 (Temp. and Humidity Sensor, Range -20°C to +60°C and 0% to 100%)
@@ -265,20 +271,53 @@ class EnOceanHumiditySensor(EnOceanSensor):
 
 class EnOceanWindowHandle(EnOceanSensor):
     """Representation of an EnOcean window handle device.
-
     EEPs (EnOcean Equipment Profiles):
     - F6-10-00 (Mechanical handle / Hoppe AG)
     """
 
     def value_changed(self, packet):
         """Update the internal state of the sensor."""
-        action = (packet.data[1] & 0x70) >> 4
+        action = packet.data[1]
 
-        if action == 0x07:
+        if action == 0xF0:
             self._attr_native_value = STATE_CLOSED
-        if action in (0x04, 0x06):
+        if action in (0xE0, 0xC0):
             self._attr_native_value = STATE_OPEN
-        if action == 0x05:
+        if action == 0xD0:
             self._attr_native_value = "tilt"
+        if action == 0x00:
+            self._attr_native_value = "anomaly"
+
+        self.schedule_update_ha_state()
+
+
+class EnOceanWallSwitch(EnOceanSensor):
+    """Representation of an EnOcean wall switch.
+    EEPs (EnOcean Equipment Profiles):
+    - F6-02-01 
+    """
+
+    def value_changed(self, packet):
+        """Update the internal state of the sensor."""
+        action = packet.data[1]
+
+        if action == 0x00:
+            self._attr_native_value = "release"
+        if action == 0x30:
+            self._attr_native_value = "BP1"
+        if action == 0x10:
+            self._attr_native_value = "BP2"
+        if action == 0x70:
+            self._attr_native_value = "BP3"
+        if action == 0x50:
+            self._attr_native_value = "BP4"
+        if action == 0x37:
+            self._attr_native_value = "BP1+3"
+        if action == 0x15:
+            self._attr_native_value = "BP2+4"
+        if action == 0x17:
+            self._attr_native_value = "BP2+3"
+        if action == 0x35:
+            self._attr_native_value = "BP1+4"
 
         self.schedule_update_ha_state()
